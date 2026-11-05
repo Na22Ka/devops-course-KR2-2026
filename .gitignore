@@ -1,0 +1,9 @@
+*.vdi
+*.vmdk
+*.iso
+*.ova
+*.sav
+.ssh/
+*.pem
+*.key
+__pycache__/
