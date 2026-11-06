@@ -93,7 +93,97 @@ disabled routed. Для IPv4 и IPv6 разрешены 80/tcp, 443/tcp и LIMIT
 | 02-keys-configured | После создания devops, настройки ключей и проверки SSH |
 | 03-ssh-hardened | После hardening и проверок входа, до UFW и локального имени |
 
-## 8. Локальное имя
+## 8. Веб-сервер
+
+Установлены пакеты `nginx` (1.24.0 в Ubuntu 24.04) и `rsync` (3.2.7):
+
+```bash
+sudo apt update && sudo apt install -y nginx rsync
+sudo systemctl enable --now nginx
+```
+
+Конфигурация: `/etc/nginx/sites-available/devops-site`; включение — ссылка
+`/etc/nginx/sites-enabled/devops-site` на этот файл. Ссылка `default` удалена,
+исходная стандартная конфигурация сохранена. Каталог `/var/www/devops-site`
+принадлежит `devops:devops`, права каталога 755, файлов 644. Рабочие процессы
+`www-data` читают файлы, но не могут создавать или изменять их.
+
+Публичный сертификат: `/etc/ssl/certs/devops.crt`, root:root, 644.
+Закрытый ключ: `/etc/ssl/private/devops.key`, root:root, 600; не переносится
+на хост и не включается в Git. Самоподписанный RSA-2048 сертификат выдан
+на 365 дней, SAN `DNS:devops.local`, с 06.11.2026 до 06.11.2027:
+
+```bash
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout /etc/ssl/private/devops.key \
+  -out /etc/ssl/certs/devops.crt \
+  -subj '/CN=devops.local' -addext 'subjectAltName=DNS:devops.local'
+sudo chown root:root /etc/ssl/private/devops.key /etc/ssl/certs/devops.crt
+sudo chmod 600 /etc/ssl/private/devops.key
+sudo chmod 644 /etc/ssl/certs/devops.crt
+```
+
+Содержимое конфигурации:
+
+```nginx
+server {
+    listen 80;
+    listen [::]:80;
+    server_name devops.local;
+    return 301 https://$host$request_uri;
+}
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name devops.local;
+    root /var/www/devops-site;
+    index index.html;
+    ssl_certificate /etc/ssl/certs/devops.crt;
+    ssl_certificate_key /etc/ssl/private/devops.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    location / {
+        try_files $uri $uri/ =404;
+    }
+    error_page 404 /404.html;
+    access_log /var/log/nginx/devops-site.access.log;
+    error_log /var/log/nginx/devops-site.error.log;
+}
+```
+
+После каждого изменения: `sudo nginx -t && sudo systemctl reload nginx`.
+Порты 80/443 разрешены существующими правилами UFW, дубли профилей Nginx
+не добавляются. HTTP возвращает 301, HTTPS — 200; неизвестный путь — 404
+со страницей `404.html`. HSTS не включён для учебного самоподписанного TLS.
+Логи: `/var/log/nginx/devops-site.access.log` и `devops-site.error.log`.
+
+На Windows создан отдельный WSL1 `DevOpsHost` (Ubuntu 24.04). В Linux-home
+пользователя student хранятся SSH-профиль и ключ с правами 600, каталог 700.
+Для общей рабочей копии на `/mnt/c` Git настроен с `core.autocrlf=true`,
+а `.gitattributes` задаёт LF для shell, Markdown и HTML. Это исключает ложное
+сообщение о незакоммиченных изменениях из-за разных переносов строк.
+Публичный сертификат получен через ранее проверенный SSH:
+
+```bash
+scp devops:/etc/ssl/certs/devops.crt ~/devops.crt
+curl --cacert ~/devops.crt -I https://devops.local
+```
+
+Доставка из чистого репозитория: `bash scripts/deploy.sh --dry-run`, затем
+`bash scripts/deploy.sh`. Скрипт передаёт только `site/` с `--delete` и
+`--chmod=D755,F644`, требует index.html, отвергает изменения (включая staged),
+открывает один SSH для rsync с BatchMode и ConnectTimeout, проверяет HTTPS
+с `--cacert` и сообщает хеш коммита. Работает из любого подкаталога.
+
+Аудит: `bash scripts/audit.sh`. По умолчанию порог сертификата 2592000 секунд
+(30 дней); для отрицательного теста используется
+`CERT_CHECK_SECONDS=34560000 bash scripts/audit.sh` (400 дней).
+Второй отрицательный тест — временные права 666 на index.html; после него
+обязательно восстановить 644 и повторить аудит.
+
+Снимок `04-nginx-https` создан после настройки TLS, до первой доставки сайта.
+Снимок `pre-practice-06` сохраняет завершённую практическую 5 до отката.
+
+## 9. Локальное имя
 
 В Windows `C:\Windows\System32\drivers\etc\hosts` добавлено:
 
@@ -110,7 +200,7 @@ disabled routed. Для IPv4 и IPv6 разрешены 80/tcp, 443/tcp и LIMIT
 `hostname -f` возвращает `devops-vm.devops.local`. Это локальное соответствие
 в hosts, публичные DNS-записи не создавались.
 
-## 9. Восстановление после 01-clean-install
+## 10. Восстановление после 01-clean-install
 
 Откат меняет состояние диска VM, но не настройки SSH-клиента Windows. После
 отката проверить проброс: гостевой SSH использует порт 22, порт хоста — 2222.
@@ -185,7 +275,7 @@ MaxAuthTries в 99-hardening.conf на 10: аудит должен дать од
 Перезапуск SSH для чтения конфигурации через sshd -T не требуется. После
 проверки обязательно вернуть MaxAuthTries 3 и проверить `sudo sshd -t`.
 
-## 10. Наблюдения
+## 11. Наблюдения
 
 При включении UFW прекратилась старая резервная SSH-сессия на прежнем
 гостевом порту 22; новые соединения на 2222 работают. В журнале UFW есть
@@ -193,7 +283,7 @@ MaxAuthTries в 99-hardening.conf на 10: аудит должен дать од
 Проверка закрытого порта 8080 дала таймаут curl (код 28) и UFW BLOCK:
 SRC=192.168.56.1, DST=192.168.56.101, PROTO=TCP, DPT=8080.
 
-## 11. Результаты проверки аудита
+## 12. Результаты проверки аудита
 
 Проверка выполнена на установленной виртуальной машине:
 
@@ -209,3 +299,26 @@ SRC=192.168.56.1, DST=192.168.56.101, PROTO=TCP, DPT=8080.
 После отрицательной проверки исходный файл восстановлен, `sshd -t` завершился
 успешно, эффективное значение MaxAuthTries снова 3. Повторный аудит прошёл.
 Служба SSH во время отрицательного теста не перезапускалась.
+
+## 13. Проверка восстановления в практической 6
+
+Откат выполнен к 01-clean-install. Настройки восстановлены по этому документу;
+пароли student/devops вводились владельцем вручную. После отката дополнительно
+потребовались DHCP для enp0s8 и каталог `/run/sshd` перед `sshd -t`:
+
+```yaml
+# /etc/netplan/60-host-only.yaml, владелец root, права 600
+network:
+  version: 2
+  ethernets:
+    enp0s8:
+      dhcp4: true
+      optional: true
+```
+
+Применить `sudo netplan apply`; при отсутствующем `/run/sshd` выполнить
+`sudo install -d -m 755 /run/sshd`. После восстановления порт гостя в пробросе
+VirtualBox снова 2222. Проверены SSH по ключу, FQDN, адреса интерфейсов и
+6 успешных проверок исходного аудита (код 0). Полное время с ожиданием
+ручного ввода паролей не укладывалось в учебные 10 минут; 6 секунд в выводе
+обозначают только повторное автоматическое применение настроек.
