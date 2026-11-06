@@ -46,5 +46,20 @@ if writable=$(sudo find /var/www/devops-site -perm -o+w 2>/dev/null) &&
     permissions_valid=yes
 fi
 check "Нет записи для всех; права закрытого ключа 600" yes "$permissions_valid"
+echo "[5] Контейнеризация"
+check "Служба docker активна" active "$(systemctl is-active docker)"
+db_health=$(docker inspect -f '{{.State.Health.Status}}' app-db-1 2>/dev/null || true)
+check "Контейнер PostgreSQL healthy" healthy "$db_health"
+bindings_safe=no
+if listeners=$(ss -H -ltn); then
+    bindings_safe=$(awk '
+        $4 ~ /:(5000|5432)$/ && $4 !~ /^127[.]0[.]0[.]1:/ {bad=1}
+        END {print (bad ? "no" : "yes")}
+    ' <<< "$listeners")
+fi
+check "Порты 5000 и 5432 доступны только через 127.0.0.1 либо не опубликованы" yes "$bindings_safe"
+app_env_file="${APP_ENV_FILE:-/home/devops/app/.env}"
+env_mode=$(sudo stat -c '%a' "$app_env_file" 2>/dev/null || true)
+check "Файл окружения приложения имеет права 600" 600 "$env_mode"
 echo "Пройдено: $PASS, не пройдено: $FAIL"
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1

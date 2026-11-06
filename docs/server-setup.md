@@ -183,7 +183,112 @@ curl --cacert ~/devops.crt -I https://devops.local
 Снимок `04-nginx-https` создан после настройки TLS, до первой доставки сайта.
 Снимок `pre-practice-06` сохраняет завершённую практическую 5 до отката.
 
-## 9. Локальное имя
+## 9. Контейнеризация
+
+Docker Engine 29.9.3 и Compose v5.7.0 установлены из официального apt-репозитория
+Docker для Ubuntu noble. Пакет docker.io не используется. Ключ репозитория —
+`/etc/apt/keyrings/docker.asc`, описание — `/etc/apt/sources.list.d/docker.sources`.
+Установлены docker-ce, docker-ce-cli, containerd.io, docker-buildx-plugin и
+docker-compose-plugin. Инструкция: https://docs.docker.com/engine/install/ubuntu/.
+
+```bash
+sudo apt update && sudo apt install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+sudo tee /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+sudo usermod -aG docker devops
+```
+
+В группу docker включён только devops, уже имеющий sudo. После включения нужна
+новая сессия. Группа даёт фактические привилегии root через Docker daemon.
+Проверки: `docker version`, `docker compose version`, `docker run --rm hello-world`.
+
+Исходники — каталог `app/` репозитория. Проект на сервере — `/home/devops/app`,
+владелец devops:devops. Dockerfile запускает Gunicorn от системного пользователя
+app; файлы кода в образе принадлежат root и имеют 644. Базовый образ python:3.12-slim;
+зависимости фиксированы в requirements.txt. Образ проекта — devops-app:1.0.
+
+Доставка выполняется из WSL (сначала пробный запуск):
+
+```bash
+rsync -avz --delete --exclude=.env --chmod=D755,F644 --dry-run app/ devops:app/
+rsync -avz --delete --exclude=.env --chmod=D755,F644 app/ devops:app/
+```
+
+`--exclude=.env` сохраняет серверный секрет при --delete. `--chmod` обязателен
+для рабочей копии Windows на /mnt/c с исходными правами 777. Секретный файл
+`/home/devops/app/.env` имеет devops:devops, 600; на хост и в Git не переносится.
+Шаблон .env.example содержит заглушку пароля. Создание только на новом стенде,
+без перезаписи существующего пароля или базы:
+
+```bash
+cd /home/devops/app
+umask 077
+cp .env.example .env
+chmod 600 .env
+sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 16)/" .env
+docker compose config --quiet
+docker compose up -d --build --wait --wait-timeout 120
+```
+
+POSTGRES_DB=app, POSTGRES_USER=app, DB_HOST=db. Значение POSTGRES_PASSWORD здесь
+не фиксируется. Compose читает env_file .env для обоих сервисов; сеть app_backend
+разрешает имя db через встроенный DNS. PostgreSQL postgres:16-alpine не публикует
+5432 на хост. Приложение публикует только `127.0.0.1:5000:5000` для Nginx.
+depends_on с service_healthy ждёт pg_isready у db до старта app. В healthcheck
+используется $${POSTGRES_USER} и $${POSTGRES_DB}, чтобы переменные раскрылись
+внутри контейнера, а не раньше в Compose. Для обоих сервисов restart: unless-stopped.
+
+Именованный том `app_db_data` подключён к `/var/lib/postgresql/data` контейнера db.
+Обычный `docker compose down` сохраняет данные; `down -v` удаляет базу и в работе
+использовался только для сброса только что созданных учебных записей. Итоговый
+том с данными сохраняется. Контейнеры — app-app-1 и app-db-1.
+
+В HTTPS-блок Nginx добавлено расположение (статический location / сохранён):
+
+```nginx
+location /app/ {
+    proxy_pass http://127.0.0.1:5000/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+Завершающий / заменяет префикс /app/ на / при передаче запроса. Применение:
+`sudo nginx -t && sudo systemctl reload nginx`. Проверки с хоста:
+
+```bash
+curl --cacert ~/devops.crt https://devops.local/app/
+curl --cacert ~/devops.crt https://devops.local/app/health
+curl --cacert ~/devops.crt -I https://devops.local/
+```
+
+Отказ приложения диагностируется по `docker compose ps`, `docker compose logs app`,
+`curl http://127.0.0.1:5000/health` и error.log Nginx. При остановленном app Nginx
+возвращает 502 с connect() failed (111: Connection refused) while connecting to upstream.
+
+Аудит содержит раздел [5]: docker active, app-db-1 healthy, отсутствие публикации
+5000/5432 за пределами 127.0.0.1, права .env 600. Итог — 14 успешных проверок.
+При тестовой публикации "5000:5000" ожидается один FAIL и код 1; после проверки
+вернуть "127.0.0.1:5000:5000" и выполнить docker compose up -d.
+
+Снимок `05-docker-compose` создаётся после проверки Compose и тома, до добавления
+обратного прокси. `pre-practice-07` сохраняет завершённую практическую 6.
+
+## 10. Локальное имя
 
 В Windows `C:\Windows\System32\drivers\etc\hosts` добавлено:
 
@@ -200,7 +305,7 @@ curl --cacert ~/devops.crt -I https://devops.local
 `hostname -f` возвращает `devops-vm.devops.local`. Это локальное соответствие
 в hosts, публичные DNS-записи не создавались.
 
-## 10. Восстановление после 01-clean-install
+## 11. Восстановление после 01-clean-install
 
 Откат меняет состояние диска VM, но не настройки SSH-клиента Windows. После
 отката проверить проброс: гостевой SSH использует порт 22, порт хоста — 2222.
@@ -275,7 +380,7 @@ MaxAuthTries в 99-hardening.conf на 10: аудит должен дать од
 Перезапуск SSH для чтения конфигурации через sshd -T не требуется. После
 проверки обязательно вернуть MaxAuthTries 3 и проверить `sudo sshd -t`.
 
-## 11. Наблюдения
+## 12. Наблюдения
 
 При включении UFW прекратилась старая резервная SSH-сессия на прежнем
 гостевом порту 22; новые соединения на 2222 работают. В журнале UFW есть
@@ -283,7 +388,7 @@ MaxAuthTries в 99-hardening.conf на 10: аудит должен дать од
 Проверка закрытого порта 8080 дала таймаут curl (код 28) и UFW BLOCK:
 SRC=192.168.56.1, DST=192.168.56.101, PROTO=TCP, DPT=8080.
 
-## 12. Результаты проверки аудита
+## 13. Результаты проверки аудита
 
 Проверка выполнена на установленной виртуальной машине:
 
@@ -300,7 +405,7 @@ SRC=192.168.56.1, DST=192.168.56.101, PROTO=TCP, DPT=8080.
 успешно, эффективное значение MaxAuthTries снова 3. Повторный аудит прошёл.
 Служба SSH во время отрицательного теста не перезапускалась.
 
-## 13. Проверка восстановления в практической 6
+## 14. Проверка восстановления в практической 6
 
 Откат выполнен к 01-clean-install. Настройки восстановлены по этому документу;
 пароли student/devops вводились владельцем вручную. После отката дополнительно
